@@ -1,6 +1,6 @@
 import Foundation
-import HealthKit
 import Combine
+import HealthKit
 
 /// SWIP SDK Manager - Main entry point for the iOS SDK
 ///
@@ -243,17 +243,70 @@ public class SwipSdkManager {
     }
 
     private func readLatestHeartRate(startTime: Date, endTime: Date) async throws -> Double? {
-        // Simplified - real implementation would query HealthKit
-        // For now, return a mock value for demonstration
-        return 75.0
+        let quantityType = try requireQuantityType(.heartRate)
+        let unit = HKUnit.count().unitDivided(by: .minute())
+        return try await queryLatestQuantitySample(
+            of: quantityType,
+            startTime: startTime,
+            endTime: endTime,
+            unit: unit
+        )
     }
 
     private func readLatestHRV(startTime: Date, endTime: Date) async throws -> Double? {
-        // Simplified - real implementation would query HealthKit
-        // For now, return a mock value for demonstration
-        return 50.0
+        // HealthKit stores SDNN in seconds; this SDK uses milliseconds (ms).
+        let quantityType = try requireQuantityType(.heartRateVariabilitySDNN)
+        let unit = HKUnit.secondUnit(with: .milli)
+        return try await queryLatestQuantitySample(
+            of: quantityType,
+            startTime: startTime,
+            endTime: endTime,
+            unit: unit
+        )
     }
 
+    private func requireQuantityType(_ identifier: HKQuantityTypeIdentifier) throws -> HKQuantityType {
+        guard let type = HKObjectType.quantityType(forIdentifier: identifier) else {
+            throw SwipError.initialization("HealthKit quantity type not available: \(identifier.rawValue)")
+        }
+        return type
+    }
+
+    private func queryLatestQuantitySample(
+        of quantityType: HKQuantityType,
+        startTime: Date,
+        endTime: Date,
+        unit: HKUnit
+    ) async throws -> Double? {
+        let predicate = HKQuery.predicateForSamples(withStart: startTime, end: endTime, options: .strictStartDate)
+        let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: quantityType,
+                predicate: predicate,
+                limit: 1,
+                sortDescriptors: [sort]
+            ) { _, samples, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                guard
+                    let sample = (samples as? [HKQuantitySample])?.first
+                else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                continuation.resume(returning: sample.quantity.doubleValue(for: unit))
+            }
+
+            self.healthStore.execute(query)
+        }
+    }
+    
     private func log(level: String, message: String) {
         if config.enableLogging {
             print("[SWIP SDK] [\(level)] \(message)")

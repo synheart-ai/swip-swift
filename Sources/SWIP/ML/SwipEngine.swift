@@ -34,10 +34,18 @@ public class SwipEngine {
         // Compute coherence score based on emotion
         let coherenceScore = computeCoherence(emotionProbabilities: emotionProbabilities)
 
+        // Compute recovery score (placeholder)
+        //
+        // The config includes `weightRecovery`, but recovery metrics are not yet implemented
+        // (e.g., resting HR deviation, sleep, trend analysis). For now we use a neutral
+        // baseline so the configured weights behave as expected.
+        let recoveryScore = 50.0
+
         // Weighted combination
         let swipScore = min(max(
             config.weightHrv * hrvScore +
-            config.weightCoherence * coherenceScore,
+            config.weightCoherence * coherenceScore +
+            config.weightRecovery * recoveryScore,
             0.0
         ), 100.0)
 

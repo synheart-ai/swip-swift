@@ -15,7 +15,7 @@ The SWIP iOS SDK enables iOS, watchOS, and macOS applications to quantitatively 
 - ✅ **Consent Management**: GDPR-compliant consent and data purging
 - ✅ **Swift Concurrency**: Modern async/await API
 - ✅ **Combine Publishers**: Real-time score and emotion updates
-- ✅ **Multi-platform**: Supports iOS, watchOS, macOS, tvOS
+- ✅ **Multi-platform**: Supports iOS, watchOS, macOS
 
 ## Installation
 
@@ -45,7 +45,6 @@ pod 'SWIP', '~> 1.0'
 - **iOS**: 13.0+
 - **watchOS**: 6.0+
 - **macOS**: 13.0+ (HealthKit requires macOS 13.0+)
-- **tvOS**: 13.0+
 - **Swift**: 5.7+
 - **Xcode**: 14.0+
 
@@ -324,6 +323,8 @@ swift build
 
 ## Architecture
 
+### SDK Components
+
 ```
 SwipSdkManager
     ├── HealthKit (HR/HRV data)
@@ -333,6 +334,19 @@ SwipSdkManager
     ├── SwipEngine (Score computation)
     ├── ConsentManager (Privacy controls)
     └── SessionManager (Session tracking)
+```
+
+### Relationship to swip-core
+
+This SDK currently implements its own scoring logic. In the future, it will integrate with [swip-core-swift](../swip-core-swift), which is a dedicated library for:
+- HRV feature extraction (SDNN, RMSSD, etc.)
+- Artifact filtering
+- On-device ML inference (Core ML, ONNX)
+- SWIP score computation (0-100)
+
+The architecture will evolve to:
+```
+HealthKit → synheart-wear-swift → swip-core-swift → swip-swift (this SDK)
 ```
 
 ## Contributing
@@ -359,7 +373,7 @@ This SDK is production-ready with the following considerations:
 - Comprehensive error handling with typed errors
 - Privacy-first architecture with GDPR compliance
 - Proper async/await concurrency
-- Multi-platform support (iOS, watchOS, macOS, tvOS)
+- Multi-platform support (iOS, watchOS, macOS)
 - Comprehensive test suite
 - Well-documented API
 
