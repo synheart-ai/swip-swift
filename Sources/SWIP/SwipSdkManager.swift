@@ -76,7 +76,21 @@ public class SwipSdkManager {
             HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
         ]
 
-        try await healthStore.requestAuthorization(toShare: [], read: typesToRead)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            healthStore.requestAuthorization(
+                toShare: Set<HKSampleType>(),
+                read: typesToRead,
+                completion: { success, error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else if !success {
+                        continuation.resume(throwing: SwipError.initialization("HealthKit authorization failed"))
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            )
+        }
     }
 
     /// Start a session for an app
