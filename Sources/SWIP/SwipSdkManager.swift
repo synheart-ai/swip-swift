@@ -1,17 +1,19 @@
 import Foundation
 import Combine
-import HealthKit
+import SynheartWear
+import SwipCore
 
 /// SWIP SDK Manager - Main entry point for the iOS SDK
 ///
 /// Integrates:
-/// - HealthKit: Reads HR, HRV data
+/// - SynheartWear: Reads HR, HRV data from HealthKit via biosignal collection layer
 /// - EmotionEngine: Runs emotion inference models
-/// - SwipEngine: Computes SWIP Score
+/// - SwipEngine: Computes SWIP Score from SwipCore
 public class SwipSdkManager {
     // Core components
-    private let healthStore: HKHealthStore
+    private let synheartWear: SynheartWear
     private let emotionEngine: EmotionEngine
+    private let baseline: PhysiologicalBaseline
     private let swipEngine: SwipEngine
     private let consentManager: ConsentManager
     private let sessionManager: SessionManager
@@ -46,9 +48,23 @@ public class SwipSdkManager {
     /// - Parameter config: SDK configuration
     public init(config: SwipSdkConfig = SwipSdkConfig()) {
         self.config = config
-        self.healthStore = HKHealthStore()
+        self.synheartWear = SynheartWear(
+            config: SynheartWearConfig(
+                enabledAdapters: [.appleHealthKit],
+                enableLocalCaching: false,
+                enableEncryption: true,
+                streamInterval: 1000 // 1 second
+            )
+        )
         self.emotionEngine = EmotionEngine(config: config.emotionConfig)
-        self.swipEngine = SwipEngine(config: config.swipConfig)
+        self.baseline = PhysiologicalBaseline(
+            restingHr: 70.0,
+            restingHrv: 50.0
+        )
+        self.swipEngine = SwipEngine(
+            baseline: baseline,
+            config: .default
+        )
         self.consentManager = ConsentManager()
         self.sessionManager = SessionManager()
     }
@@ -57,12 +73,16 @@ public class SwipSdkManager {
     public func initialize() async throws {
         if initialized { return }
 
-        guard HKHealthStore.isHealthDataAvailable() else {
-            throw SwipError.initialization("HealthKit not available")
-        }
+        do {
+            // Initialize SynheartWear SDK
+            try await synheartWear.initialize()
 
-        initialized = true
-        log(level: "info", message: "SWIP SDK initialized")
+            initialized = true
+            log(level: "info", message: "SWIP SDK initialized")
+        } catch {
+            log(level: "error", message: "Failed to initialize: \(error)")
+            throw SwipError.initialization("Failed to initialize SWIP SDK: \(error)")
+        }
     }
 
     /// Request health permissions
@@ -71,25 +91,16 @@ public class SwipSdkManager {
             throw SwipError.invalidConfiguration("SWIP SDK not initialized")
         }
 
-        let typesToRead: Set<HKObjectType> = [
-            HKObjectType.quantityType(forIdentifier: .heartRate)!,
-            HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
-        ]
+        do {
+            let permissions: Set<PermissionType> = [
+                .heartRate,
+                .heartRateVariability
+            ]
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.requestAuthorization(
-                toShare: Set<HKSampleType>(),
-                read: typesToRead,
-                completion: { success, error in
-                    if let error = error {
-                        continuation.resume(throwing: error)
-                    } else if !success {
-                        continuation.resume(throwing: SwipError.initialization("HealthKit authorization failed"))
-                    } else {
-                        continuation.resume()
-                    }
-                }
-            )
+            _ = try await synheartWear.requestPermissions(permissions)
+        } catch {
+            log(level: "error", message: "Failed to request permissions: \(error)")
+            throw SwipError.initialization("Failed to request permissions: \(error)")
         }
     }
 
@@ -220,17 +231,19 @@ public class SwipSdkManager {
 
     private func processHealthData() async {
         do {
-            // Read heart rate data from HealthKit
+            // Read biometric data from SynheartWear
+            let metrics = try await synheartWear.readMetrics(isRealTime: true)
+
+            guard let hr = metrics.get("hr"),
+                  let hrv = metrics.get("hrv_sdnn") else {
+                return
+            }
+
+            let motion = metrics.get("motion") ?? 0.0
             let now = Date()
-            let fiveSecondsAgo = now.addingTimeInterval(-5)
-
-            let hr = try await readLatestHeartRate(startTime: fiveSecondsAgo, endTime: now)
-            let hrv = try await readLatestHRV(startTime: fiveSecondsAgo, endTime: now)
-
-            guard let heartRate = hr, let hrvValue = hrv else { return }
 
             // Push to emotion engine
-            emotionEngine.push(hr: heartRate, hrv: hrvValue, timestamp: now, motion: 0.0)
+            emotionEngine.push(hr: hr, hrv: hrv, timestamp: now, motion: motion)
 
             // Get emotion result if ready
             let emotionResults = emotionEngine.consumeReady()
@@ -238,12 +251,32 @@ public class SwipSdkManager {
                 sessionEmotions.append(latestEmotion)
                 emotionSubject.send(latestEmotion)
 
+                // Convert EmotionResult to EmotionSnapshot
+                let arousalScore: Double
+                switch latestEmotion.emotion.lowercased() {
+                case "stressed":
+                    arousalScore = 0.8
+                case "amused", "excited":
+                    arousalScore = 0.6
+                case "calm", "relaxed":
+                    arousalScore = 0.2
+                default:
+                    arousalScore = 0.5
+                }
+
+                let emotionSnapshot = EmotionSnapshot(
+                    arousalScore: arousalScore,
+                    state: latestEmotion.emotion,
+                    confidence: latestEmotion.confidence,
+                    warmingUp: false
+                )
+
                 // Compute SWIP score
                 let swipResult = swipEngine.computeScore(
-                    hr: heartRate,
-                    hrv: hrvValue,
-                    motion: 0.0,
-                    emotionProbabilities: latestEmotion.probabilities
+                    hr: hr,
+                    hrv: hrv,
+                    motion: motion,
+                    emotion: emotionSnapshot
                 )
 
                 sessionScores.append(swipResult)
@@ -256,71 +289,6 @@ public class SwipSdkManager {
         }
     }
 
-    private func readLatestHeartRate(startTime: Date, endTime: Date) async throws -> Double? {
-        let quantityType = try requireQuantityType(.heartRate)
-        let unit = HKUnit.count().unitDivided(by: .minute())
-        return try await queryLatestQuantitySample(
-            of: quantityType,
-            startTime: startTime,
-            endTime: endTime,
-            unit: unit
-        )
-    }
-
-    private func readLatestHRV(startTime: Date, endTime: Date) async throws -> Double? {
-        // HealthKit stores SDNN in seconds; this SDK uses milliseconds (ms).
-        let quantityType = try requireQuantityType(.heartRateVariabilitySDNN)
-        let unit = HKUnit.secondUnit(with: .milli)
-        return try await queryLatestQuantitySample(
-            of: quantityType,
-            startTime: startTime,
-            endTime: endTime,
-            unit: unit
-        )
-    }
-
-    private func requireQuantityType(_ identifier: HKQuantityTypeIdentifier) throws -> HKQuantityType {
-        guard let type = HKObjectType.quantityType(forIdentifier: identifier) else {
-            throw SwipError.initialization("HealthKit quantity type not available: \(identifier.rawValue)")
-        }
-        return type
-    }
-
-    private func queryLatestQuantitySample(
-        of quantityType: HKQuantityType,
-        startTime: Date,
-        endTime: Date,
-        unit: HKUnit
-    ) async throws -> Double? {
-        let predicate = HKQuery.predicateForSamples(withStart: startTime, end: endTime, options: .strictStartDate)
-        let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let query = HKSampleQuery(
-                sampleType: quantityType,
-                predicate: predicate,
-                limit: 1,
-                sortDescriptors: [sort]
-            ) { _, samples, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                guard
-                    let sample = (samples as? [HKQuantitySample])?.first
-                else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                continuation.resume(returning: sample.quantity.doubleValue(for: unit))
-            }
-
-            self.healthStore.execute(query)
-        }
-    }
-    
     private func log(level: String, message: String) {
         if config.enableLogging {
             print("[SWIP SDK] [\(level)] \(message)")

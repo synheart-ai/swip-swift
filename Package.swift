@@ -16,14 +16,18 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "2.0.0")
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "2.0.0"),
+        .package(path: "../synheart-wear-swift"),
+        .package(path: "../swip-core-swift")
     ],
     targets: [
         .target(
             name: "SWIP",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "Crypto", package: "swift-crypto")
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "SynheartWear", package: "synheart-wear-swift"),
+                .product(name: "SwipCore", package: "swip-core-swift")
             ],
             path: "Sources",
             resources: [
